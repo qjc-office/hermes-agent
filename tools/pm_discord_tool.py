@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from tools.pm_members import MEMBERS, DISCORD_ID_BY_CODE
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -30,16 +32,10 @@ URGENCY_COLORS: Dict[str, int] = {
     "critical": 0xEF4444,  # 빨강
 }
 
-# 팀원 Discord ID 매핑 (Supabase UUID와 별개)
+# 팀원 Discord 매핑 (pm_members.py 단일 원장에서 파생)
 DISCORD_MEMBERS: Dict[str, Dict[str, str]] = {
-    "sangrok": {
-        "discord_id": "905300831501430914",
-        "name": "정상록",
-    },
-    "kwango": {
-        "discord_id": "1404732845183864912",
-        "name": "김광오",
-    },
+    code: {"discord_id": m["discord_id"], "name": m["name"]}
+    for code, m in MEMBERS.items()
 }
 
 # PM 알림 채널 (#큐봇-브리핑)
@@ -390,7 +386,7 @@ registry.register(
     schema=PM_SEND_NOTIFICATION_SCHEMA,
     handler=_handle_pm_send_notification,
     check_fn=_check_discord_available,
-    requires_env=["DISCORD_BOT_TOKEN"],
+    requires_env=[],  # check_fn이 Bot토큰 또는 webhook 중 하나 확인
     emoji="📢",
 )
 

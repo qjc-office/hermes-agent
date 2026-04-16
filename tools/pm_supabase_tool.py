@@ -11,7 +11,6 @@ Registers six LLM-callable tools:
 Authentication uses Supabase service_role_key via env vars.
 """
 
-import functools
 import json
 import logging
 import os
@@ -20,6 +19,13 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
+
+from tools.pm_members import (
+    MEMBERS,
+    MEMBER_CODE_BY_ID,
+    MEMBER_NAME_BY_ID,
+    PM_ENV_VARS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,21 +53,7 @@ UUID_RE = re.compile(
     re.IGNORECASE,
 )
 
-MEMBERS: Dict[str, Dict[str, str]] = {
-    "sangrok": {
-        "id": "302bc407-b580-4633-95db-592f00b9fd8d",
-        "name": "정상록",
-    },
-    "kwango": {
-        "id": "0e77befe-8f50-4860-9b6f-de0ac9cd16a4",
-        "name": "김광오",
-    },
-}
-
-# member_id → 이름 역매핑
-_MEMBER_NAME_BY_ID = {m["id"]: m["name"] for m in MEMBERS.values()}
-# member_id → 코드명 역매핑 (라우팅용: UUID → "sangrok"/"kwango")
-_MEMBER_CODE_BY_ID = {v["id"]: k for k, v in MEMBERS.items()}
+_TASK_QUERY_LIMIT = 50  # 태스크 기본 조회 상한
 
 _TIMEOUT = 15  # 초
 _http_client: Optional[httpx.Client] = None
@@ -164,11 +156,11 @@ def _validate_uuid(value: str) -> bool:
 def _member_name(member_id: Optional[str]) -> str:
     if not member_id:
         return "미할당"
-    return _MEMBER_NAME_BY_ID.get(member_id, member_id[:8])
+    return MEMBER_NAME_BY_ID.get(member_id, member_id[:8])
 
 
 def _calc_delay_days(due_date_str: Optional[str]) -> Optional[int]:
-    """due_date 기준 지연 일수 (양수 = 지연). None이면 기한 없음."""
+    """due_date 기준 지연 일수. 양수=지연, 0=당일, 음수=여유. None=기한없음."""
     if not due_date_str:
         return None
     try:
@@ -176,8 +168,7 @@ def _calc_delay_days(due_date_str: Optional[str]) -> Optional[int]:
         if due.tzinfo is None:
             due = due.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
-        delta = (now - due).days
-        return delta if delta > 0 else 0
+        return (now - due).days
     except (ValueError, TypeError):
         return None
 
@@ -200,7 +191,7 @@ def _handle_pm_get_projects(args: dict, **kw) -> str:
             "order": "name.asc",
         })
         for row in rows:
-            row["owner_code"] = _MEMBER_CODE_BY_ID.get(row.get("owner_id"), "sangrok")
+            row["owner_code"] = MEMBER_CODE_BY_ID.get(row.get("owner_id"), "sangrok")
         return json.dumps({"count": len(rows), "projects": rows}, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_get_projects error: %s", e)
@@ -216,7 +207,7 @@ def _handle_pm_get_tasks(args: dict, **kw) -> str:
                 "due_date,project_id,created_at"
             ),
             "order": "created_at.desc",
-            "limit": "30",
+            "limit": str(_TASK_QUERY_LIMIT),
         }
 
         project_id = args.get("project_id")
@@ -527,7 +518,6 @@ PM_UPDATE_TASK_SCHEMA = {
 from tools.registry import registry, tool_error  # noqa: E402
 
 _PM_TOOLSET = "pm"
-_PM_ENV = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
 
 registry.register(
     name="pm_get_projects",
@@ -535,7 +525,7 @@ registry.register(
     schema=PM_GET_PROJECTS_SCHEMA,
     handler=_handle_pm_get_projects,
     check_fn=_check_pm_available,
-    requires_env=_PM_ENV,
+    requires_env=PM_ENV_VARS,
     emoji="📊",
 )
 
@@ -545,7 +535,7 @@ registry.register(
     schema=PM_GET_TASKS_SCHEMA,
     handler=_handle_pm_get_tasks,
     check_fn=_check_pm_available,
-    requires_env=_PM_ENV,
+    requires_env=PM_ENV_VARS,
     emoji="📋",
 )
 
@@ -555,7 +545,7 @@ registry.register(
     schema=PM_GET_GITHUB_ACTIVITY_SCHEMA,
     handler=_handle_pm_get_github_activity,
     check_fn=_check_pm_available,
-    requires_env=_PM_ENV,
+    requires_env=PM_ENV_VARS,
     emoji="🔀",
 )
 
@@ -565,7 +555,7 @@ registry.register(
     schema=PM_GET_PRDS_SCHEMA,
     handler=_handle_pm_get_prds,
     check_fn=_check_pm_available,
-    requires_env=_PM_ENV,
+    requires_env=PM_ENV_VARS,
     emoji="📝",
 )
 
@@ -575,7 +565,7 @@ registry.register(
     schema=PM_ADVANCE_WORKFLOW_SCHEMA,
     handler=_handle_pm_advance_workflow,
     check_fn=_check_pm_available,
-    requires_env=_PM_ENV,
+    requires_env=PM_ENV_VARS,
     emoji="⏩",
 )
 
@@ -585,6 +575,6 @@ registry.register(
     schema=PM_UPDATE_TASK_SCHEMA,
     handler=_handle_pm_update_task,
     check_fn=_check_pm_available,
-    requires_env=_PM_ENV,
+    requires_env=PM_ENV_VARS,
     emoji="✅",
 )

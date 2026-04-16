@@ -9,12 +9,14 @@ import json
 import logging
 from typing import Dict, Optional
 
+from tools.pm_members import PM_ENV_VARS
 from tools.pm_supabase_tool import (
     _check_pm_available,
     _safe_error_msg,
     _supabase_get,
     _supabase_post,
 )
+from tools.registry import tool_error  # noqa: E402 — 상단 임포트로 이동
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +44,12 @@ def _handle_pm_save_decision(args: dict, **kw) -> str:
         if not reasoning:
             return tool_error("reasoning은 필수입니다.")
 
+        safe_actions = actions if isinstance(actions, list) else []
         data = {
             "run_type": run_type,
             "reasoning": reasoning,
-            "actions": actions if isinstance(actions, list) else [],
-            "actions_executed": len(actions) if isinstance(actions, list) else 0,
+            "actions": safe_actions,
+            "actions_executed": len(safe_actions),
             "context_summary": context_summary[:_MAX_CONTEXT_CHARS] if context_summary else None,
             "model_used": args.get("model_used"),
             "tokens_used": args.get("tokens_used"),
@@ -164,9 +167,7 @@ PM_GET_RECENT_DECISIONS_SCHEMA = {
 # 레지스트리 등록
 # ---------------------------------------------------------------------------
 
-from tools.registry import registry, tool_error  # noqa: E402
-
-_PM_ENV = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
+from tools.registry import registry  # noqa: E402
 
 registry.register(
     name="pm_save_decision",
@@ -174,7 +175,7 @@ registry.register(
     schema=PM_SAVE_DECISION_SCHEMA,
     handler=_handle_pm_save_decision,
     check_fn=_check_pm_available,
-    requires_env=_PM_ENV,
+    requires_env=PM_ENV_VARS,
     emoji="🧠",
 )
 
@@ -184,6 +185,6 @@ registry.register(
     schema=PM_GET_RECENT_DECISIONS_SCHEMA,
     handler=_handle_pm_get_recent_decisions,
     check_fn=_check_pm_available,
-    requires_env=_PM_ENV,
+    requires_env=PM_ENV_VARS,
     emoji="🧠",
 )
