@@ -60,6 +60,8 @@ MEMBERS: Dict[str, Dict[str, str]] = {
 
 # member_id → 이름 역매핑
 _MEMBER_NAME_BY_ID = {m["id"]: m["name"] for m in MEMBERS.values()}
+# member_id → 코드명 역매핑 (라우팅용: UUID → "sangrok"/"kwango")
+_MEMBER_CODE_BY_ID = {v["id"]: k for k, v in MEMBERS.items()}
 
 _TIMEOUT = 15  # 초
 
@@ -193,10 +195,12 @@ def _handle_pm_get_projects(args: dict, **kw) -> str:
             "select": (
                 "id,name,workflow_stage,progress_pct,"
                 "total_tasks,done_tasks,active_tasks,"
-                "owner_name,github_recent_commits,github_recent_prs"
+                "owner_id,owner_name,github_recent_commits,github_recent_prs"
             ),
             "order": "name.asc",
         })
+        for row in rows:
+            row["owner_code"] = _MEMBER_CODE_BY_ID.get(row.get("owner_id"), "sangrok")
         return json.dumps({"count": len(rows), "projects": rows}, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_get_projects error: %s", e)

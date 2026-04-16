@@ -20,6 +20,33 @@ metadata:
 | 정상록 | sangrok | 302bc407-... | 905300831501430914 | 대표 (전략/리뷰/승인) |
 | 김광오 | kwango | 0e77befe-... | 1404732845183864912 | 개발자 (코딩/구현) |
 
+## 알림 라우팅 규칙 (CRITICAL)
+
+pm_get_projects 결과의 `owner_code` 필드가 해당 프로젝트의 리드(담당자)다. 이 값으로 DM 대상을 결정하라.
+
+| 알림 유형 | DM 대상 | 도구 호출 |
+|-----------|---------|-----------|
+| 태스크 진행/지연 | owner_code (프로젝트 리드) | `pm_send_dm(target=owner_code)` |
+| 이메일/미팅/액션 리마인드 | owner_code (프로젝트 리드) | `pm_send_dm(target=owner_code)` |
+| 돈/계약/견적/금액 확인 | sangrok (대표) | `pm_send_dm(target="sangrok")` |
+| 전략/방향 결정 | sangrok (대표) | `pm_send_dm(target="sangrok")` |
+| D+3 에스컬레이션 | sangrok (대표) | `pm_send_dm(target="sangrok")` — 재할당 제안 |
+| 전체 현황/브리핑 | 채널 전체 | `pm_send_notification(target="all")` |
+
+**핵심 원칙:**
+1. 태스크 관련 알림은 **무조건 owner_code에게 DM**. 대표에게 보내지 않는다.
+2. **돈/계약/견적/전략**만 대표에게 보낸다.
+3. D+3 이상 지연만 대표에게 에스컬레이션한다. D+1~2는 리드에게만.
+4. 채널 브리핑에는 "→ 광오님" / "→ 상록님 확인 대기" 형태로 담당자 표시.
+
+**예시 흐름:**
+```
+1. pm_get_projects → 세이프코리아 owner_code="kwango", 더플로라 owner_code="sangrok"
+2. 세이프코리아 이메일 지연 → pm_send_dm(target="kwango", message="광오님, 세이프코리아 이메일 오늘 보내실 수 있을까요?")
+3. 더플로라 견적 확인 → pm_send_dm(target="sangrok", message="상록님, 더플로라 견적서 금액 확인 부탁드립니다")
+4. 채널 → pm_send_notification(target="all", message="오늘: 세이프코리아 이메일 → 광오님 / 더플로라 견적 → 상록님 확인 대기")
+```
+
 ## 알림 전략 (CRITICAL)
 
 **2채널 동시 알림** — 채널 게시 + 개인 DM으로 압박:
@@ -57,7 +84,7 @@ meeting → prd → tdl_creation → notification → tdl_progress → review_me
 | D+0 | 아침 브리핑에 포함 | 생략 |
 | D+1 | @멘션 + "진행 상황 확인" | pm_send_dm: "진행 중이신가요?" |
 | D+2 | @멘션 + 대표 CC | pm_send_dm: "블로커가 있나요?" (also_dm=true) |
-| D+3+ | @전원 + 재할당 제안 | pm_send_dm: 대표에게 재할당/범위 조정 제안 |
+| D+3+ | @전원 + 재할당 제안 | pm_send_dm(target="sangrok"): 대표에게 재할당/범위 조정 제안 |
 
 GitHub 커밋이 있으면 에스컬레이션을 한 단계 낮춤.
 
@@ -119,8 +146,9 @@ g2b-monitor 필터 작업 수고하셨습니다 👍
 
 ### morning_briefing (평일 9시)
 - 채널: pm_send_notification(target="all") — **행동 필요한 2-3개만** 짧게. 전체 나열 금지.
-- DM: pm_send_dm(target="kwango") — "광오님, 오늘 세이프코리아 이메일 + 더플로라 태스크 부탁드립니다."
-- DM: pm_send_dm(target="sangrok") — "상록님, 오늘 PRD 리뷰 대기 1건 있습니다."
+- DM: 각 프로젝트의 `owner_code`에게 해당 프로젝트 할 일 DM. 대표 소유 프로젝트는 대표에게, 광오 소유 프로젝트는 광오에게.
+  - 예: owner_code="kwango" → pm_send_dm(target="kwango") — "광오님, 오늘 세이프코리아 이메일 + 더플로라 태스크 부탁드립니다."
+  - 예: owner_code="sangrok" → pm_send_dm(target="sangrok") — "상록님, 오늘 PRD 리뷰 대기 1건 있습니다."
 
 ### daily_report (평일 18시)
 - 채널: pm_send_notification — 오늘 완료된 것 칭찬 + 내일 주의 항목. 숫자 나열 금지.
