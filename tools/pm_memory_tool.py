@@ -45,12 +45,15 @@ def _handle_pm_save_decision(args: dict, **kw) -> str:
             return tool_error("reasoning은 필수입니다.")
 
         safe_actions = actions if isinstance(actions, list) else []
+        # context_summary가 비어있으면 reasoning의 앞부분을 fallback으로 사용
+        # (DB의 NOT NULL 제약 준수)
+        ctx = context_summary if context_summary else reasoning
         data = {
             "run_type": run_type,
             "reasoning": reasoning,
             "actions": safe_actions,
             "actions_executed": len(safe_actions),
-            "context_summary": context_summary[:_MAX_CONTEXT_CHARS] if context_summary else None,
+            "context_summary": ctx[:_MAX_CONTEXT_CHARS],
             "model_used": args.get("model_used"),
             "tokens_used": args.get("tokens_used"),
         }
