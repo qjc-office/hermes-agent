@@ -63,7 +63,7 @@ _HERMES_CORE_TOOLS = [
     # QJC AI PM (gated on SUPABASE_URL via check_fn)
     "pm_get_projects", "pm_get_tasks", "pm_get_github_activity", "pm_get_prds",
     "pm_advance_workflow", "pm_update_task",
-    "pm_send_notification",
+    "pm_send_notification", "pm_send_dm",
     "pm_save_decision", "pm_get_recent_decisions",
 ]
 
@@ -83,7 +83,7 @@ TOOLSETS = {
         "tools": [
             "pm_get_projects", "pm_get_tasks", "pm_get_github_activity", "pm_get_prds",
             "pm_advance_workflow", "pm_update_task",
-            "pm_send_notification",
+            "pm_send_notification", "pm_send_dm",
             "pm_save_decision", "pm_get_recent_decisions",
         ],
         "includes": []
