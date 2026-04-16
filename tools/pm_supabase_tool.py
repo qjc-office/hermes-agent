@@ -11,6 +11,7 @@ Registers six LLM-callable tools:
 Authentication uses Supabase service_role_key via env vars.
 """
 
+import functools
 import json
 import logging
 import os
@@ -67,6 +68,7 @@ _TIMEOUT = 15  # 초
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=None)
 def _get_config() -> Tuple[str, str]:
     """환경변수에서 (supabase_url, service_role_key) 반환.
 
@@ -85,15 +87,31 @@ def _check_pm_available() -> bool:
     return bool(url and key)
 
 
-def _supabase_headers() -> Dict[str, str]:
-    """Supabase REST API 인증 헤더."""
-    _, key = _get_config()
-    return {
-        "apikey": key,
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
+def _get_client() -> httpx.Client:
+    """모듈 수준 httpx Client (연결 풀 재사용)."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _, key = _get_config()
+        _http_client = httpx.Client(
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            timeout=_TIMEOUT,
+        )
+    return _http_client
+
+
+_http_client: Optional[httpx.Client] = None
+
+
+def _safe_error_msg(operation: str, exc: Exception) -> str:
+    """예외에서 민감 정보를 제거한 에러 메시지 생성."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{operation}: HTTP {exc.response.status_code}"
+    return f"{operation} (로그 확인)"
 
 
 def _supabase_get(
@@ -102,11 +120,9 @@ def _supabase_get(
 ) -> Any:
     """Supabase PostgREST GET 요청."""
     url, _ = _get_config()
-    resp = httpx.get(
+    resp = _get_client().get(
         f"{url}/rest/v1/{table}",
-        headers=_supabase_headers(),
         params=params or {},
-        timeout=_TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()
@@ -119,12 +135,10 @@ def _supabase_patch(
 ) -> Any:
     """Supabase PostgREST PATCH 요청 (단일 행)."""
     url, _ = _get_config()
-    resp = httpx.patch(
+    resp = _get_client().patch(
         f"{url}/rest/v1/{table}",
-        headers=_supabase_headers(),
         params={"id": f"eq.{row_id}"},
         json=data,
-        timeout=_TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()
@@ -133,11 +147,9 @@ def _supabase_patch(
 def _supabase_post(table: str, data: Dict[str, Any]) -> Any:
     """Supabase PostgREST POST 요청 (INSERT)."""
     url, _ = _get_config()
-    resp = httpx.post(
+    resp = _get_client().post(
         f"{url}/rest/v1/{table}",
-        headers=_supabase_headers(),
         json=data,
-        timeout=_TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()
@@ -188,7 +200,7 @@ def _handle_pm_get_projects(args: dict, **kw) -> str:
         return json.dumps({"count": len(rows), "projects": rows}, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_get_projects error: %s", e)
-        return tool_error(f"프로젝트 조회 실패: {e}")
+        return tool_error(_safe_error_msg("프로젝트 조회 실패", e))
 
 
 def _handle_pm_get_tasks(args: dict, **kw) -> str:
@@ -211,6 +223,8 @@ def _handle_pm_get_tasks(args: dict, **kw) -> str:
 
         status_filter = args.get("status")
         if status_filter:
+            if status_filter not in VALID_TASK_STATUSES:
+                return tool_error(f"잘못된 상태: {status_filter}. 허용: {', '.join(sorted(VALID_TASK_STATUSES))}")
             params["status"] = f"eq.{status_filter}"
 
         assigned = args.get("assigned_to")
@@ -232,7 +246,7 @@ def _handle_pm_get_tasks(args: dict, **kw) -> str:
         return json.dumps({"count": len(rows), "tasks": rows}, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_get_tasks error: %s", e)
-        return tool_error(f"태스크 조회 실패: {e}")
+        return tool_error(_safe_error_msg("태스크 조회 실패", e))
 
 
 def _handle_pm_get_github_activity(args: dict, **kw) -> str:
@@ -269,7 +283,7 @@ def _handle_pm_get_github_activity(args: dict, **kw) -> str:
         return json.dumps({"count": len(rows), "events": rows}, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_get_github_activity error: %s", e)
-        return tool_error(f"GitHub 활동 조회 실패: {e}")
+        return tool_error(_safe_error_msg("GitHub 활동 조회 실패", e))
 
 
 def _handle_pm_get_prds(args: dict, **kw) -> str:
@@ -291,7 +305,7 @@ def _handle_pm_get_prds(args: dict, **kw) -> str:
         return json.dumps({"count": len(rows), "prds": rows}, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_get_prds error: %s", e)
-        return tool_error(f"PRD 조회 실패: {e}")
+        return tool_error(_safe_error_msg("PRD 조회 실패", e))
 
 
 def _handle_pm_advance_workflow(args: dict, **kw) -> str:
@@ -318,7 +332,7 @@ def _handle_pm_advance_workflow(args: dict, **kw) -> str:
         }, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_advance_workflow error: %s", e)
-        return tool_error(f"워크플로우 전진 실패: {e}")
+        return tool_error(_safe_error_msg("워크플로우 전진 실패", e))
 
 
 def _handle_pm_update_task(args: dict, **kw) -> str:
@@ -345,7 +359,7 @@ def _handle_pm_update_task(args: dict, **kw) -> str:
         }, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_update_task error: %s", e)
-        return tool_error(f"태스크 상태 변경 실패: {e}")
+        return tool_error(_safe_error_msg("태스크 상태 변경 실패", e))
 
 
 # ---------------------------------------------------------------------------

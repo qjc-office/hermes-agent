@@ -11,6 +11,7 @@ from typing import Dict, Optional
 
 from tools.pm_supabase_tool import (
     _check_pm_available,
+    _safe_error_msg,
     _supabase_get,
     _supabase_post,
 )
@@ -18,6 +19,11 @@ from tools.pm_supabase_tool import (
 logger = logging.getLogger(__name__)
 
 _MAX_CONTEXT_CHARS = 5000
+
+VALID_RUN_TYPES = frozenset({
+    "progress_check", "morning_briefing",
+    "daily_report", "weekly_report",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +60,7 @@ def _handle_pm_save_decision(args: dict, **kw) -> str:
         }, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_save_decision error: %s", e)
-        return tool_error(f"판단 기록 실패: {e}")
+        return tool_error(_safe_error_msg("판단 기록 실패", e))
 
 
 def _handle_pm_get_recent_decisions(args: dict, **kw) -> str:
@@ -70,6 +76,8 @@ def _handle_pm_get_recent_decisions(args: dict, **kw) -> str:
 
         run_type = args.get("run_type")
         if run_type:
+            if run_type not in VALID_RUN_TYPES:
+                return tool_error(f"잘못된 run_type: {run_type}. 허용: {', '.join(sorted(VALID_RUN_TYPES))}")
             params["run_type"] = f"eq.{run_type}"
 
         rows = _supabase_get("os_pm_agent_decisions", params)
@@ -80,7 +88,7 @@ def _handle_pm_get_recent_decisions(args: dict, **kw) -> str:
         }, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_get_recent_decisions error: %s", e)
-        return tool_error(f"판단 이력 조회 실패: {e}")
+        return tool_error(_safe_error_msg("판단 이력 조회 실패", e))
 
 
 # ---------------------------------------------------------------------------

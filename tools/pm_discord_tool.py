@@ -45,6 +45,12 @@ DISCORD_MEMBERS: Dict[str, Dict[str, str]] = {
 # PM 알림 채널 (#큐봇-브리핑)
 PM_CHANNEL_ID = "1483687019573022751"
 
+# 허용 채널 화이트리스트 (임의 채널 발송 차단)
+ALLOWED_CHANNEL_IDS = frozenset({
+    PM_CHANNEL_ID,                # #큐봇-브리핑
+    "1483687068994633869",        # #일반
+})
+
 _TIMEOUT = 10
 _DISCORD_API = "https://discord.com/api/v10"
 
@@ -196,8 +202,10 @@ def _handle_pm_send_notification(args: dict, **kw) -> str:
         elif target in DISCORD_MEMBERS:
             mention_text = _mention(target)
 
-        # 채널에 embed + @멘션 전송
+        # 채널에 embed + @멘션 전송 (화이트리스트 검증)
         channel_id = args.get("channel_id", PM_CHANNEL_ID)
+        if channel_id not in ALLOWED_CHANNEL_IDS:
+            return tool_error(f"허용되지 않은 채널: {channel_id}")
         _send_channel_message(channel_id, content=mention_text, embed=embed)
         results = [f"채널 발송 완료 (#{channel_id})"]
 
@@ -227,7 +235,7 @@ def _handle_pm_send_notification(args: dict, **kw) -> str:
         }, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_send_notification error: %s", e)
-        return tool_error(f"Discord 알림 발송 실패: {e}")
+        return tool_error("Discord 알림 발송 실패 (로그 확인)")
 
 
 def _handle_pm_send_dm(args: dict, **kw) -> str:
@@ -247,7 +255,7 @@ def _handle_pm_send_dm(args: dict, **kw) -> str:
         color = URGENCY_COLORS.get(urgency, URGENCY_COLORS["medium"])
 
         embed: Dict[str, Any] = {
-            "title": f"📋 PM 메시지",
+            "title": "📋 PM 메시지",
             "description": message,
             "color": color,
         }
@@ -268,7 +276,7 @@ def _handle_pm_send_dm(args: dict, **kw) -> str:
         }, ensure_ascii=False)
     except Exception as e:
         logger.error("pm_send_dm error: %s", e)
-        return tool_error(f"DM 발송 실패: {e}")
+        return tool_error("DM 발송 실패 (로그 확인)")
 
 
 # ---------------------------------------------------------------------------
