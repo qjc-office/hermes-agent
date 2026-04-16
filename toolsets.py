@@ -60,6 +60,11 @@ _HERMES_CORE_TOOLS = [
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    # QJC AI PM (gated on SUPABASE_URL via check_fn)
+    "pm_get_projects", "pm_get_tasks", "pm_get_github_activity", "pm_get_prds",
+    "pm_advance_workflow", "pm_update_task",
+    "pm_send_notification",
+    "pm_save_decision", "pm_get_recent_decisions",
 ]
 
 
@@ -73,6 +78,17 @@ TOOLSETS = {
         "includes": []  # No other toolsets included
     },
     
+    "pm": {
+        "description": "AI PM tools — Supabase 프로젝트/태스크 조회, Discord 알림, 판단 기록",
+        "tools": [
+            "pm_get_projects", "pm_get_tasks", "pm_get_github_activity", "pm_get_prds",
+            "pm_advance_workflow", "pm_update_task",
+            "pm_send_notification",
+            "pm_save_decision", "pm_get_recent_decisions",
+        ],
+        "includes": []
+    },
+
     "search": {
         "description": "Web search only (no content extraction/scraping)",
         "tools": ["web_search"],
