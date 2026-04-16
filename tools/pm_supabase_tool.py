@@ -64,18 +64,19 @@ _MEMBER_NAME_BY_ID = {m["id"]: m["name"] for m in MEMBERS.values()}
 _MEMBER_CODE_BY_ID = {v["id"]: k for k, v in MEMBERS.items()}
 
 _TIMEOUT = 15  # 초
+_http_client: Optional[httpx.Client] = None
 
 # ---------------------------------------------------------------------------
 # 설정 + 헬퍼
 # ---------------------------------------------------------------------------
 
 
-@functools.lru_cache(maxsize=None)
 def _get_config() -> Tuple[str, str]:
     """환경변수에서 (supabase_url, service_role_key) 반환.
 
     PM_SUPABASE_URL / PM_SUPABASE_SERVICE_ROLE_KEY 우선,
     없으면 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 폴백.
+    주의: lru_cache 사용 금지 — secret rotation 시 stale key 방지.
     """
     return (
         (os.getenv("PM_SUPABASE_URL") or os.getenv("SUPABASE_URL", "")).rstrip("/"),
@@ -106,11 +107,10 @@ def _get_client() -> httpx.Client:
     return _http_client
 
 
-_http_client: Optional[httpx.Client] = None
-
-
 def _safe_error_msg(operation: str, exc: Exception) -> str:
     """예외에서 민감 정보를 제거한 에러 메시지 생성."""
+    if isinstance(exc, httpx.TimeoutException):
+        return f"{operation}: 타임아웃 ({_TIMEOUT}초 초과)"
     if isinstance(exc, httpx.HTTPStatusError):
         return f"{operation}: HTTP {exc.response.status_code}"
     return f"{operation} (로그 확인)"
@@ -230,6 +230,9 @@ def _handle_pm_get_tasks(args: dict, **kw) -> str:
             if status_filter not in VALID_TASK_STATUSES:
                 return tool_error(f"잘못된 상태: {status_filter}. 허용: {', '.join(sorted(VALID_TASK_STATUSES))}")
             params["status"] = f"eq.{status_filter}"
+        else:
+            # 스키마 description과 일치: 생략 시 done/cancelled 제외
+            params["status"] = "not.in.(done,cancelled)"
 
         assigned = args.get("assigned_to")
         if assigned:
@@ -325,6 +328,23 @@ def _handle_pm_advance_workflow(args: dict, **kw) -> str:
                 f"잘못된 워크플로우 단계: {new_stage}. "
                 f"허용: {', '.join(WORKFLOW_ORDER)}"
             )
+
+        # 현재 단계 조회 → 한 단계씩만 전진 허용
+        current = _supabase_get("os_projects", {
+            "id": f"eq.{project_id}",
+            "select": "workflow_stage",
+        })
+        if not current:
+            return tool_error("프로젝트를 찾을 수 없습니다")
+        current_stage = current[0].get("workflow_stage")
+        if current_stage in WORKFLOW_ORDER and new_stage in WORKFLOW_ORDER:
+            cur_idx = WORKFLOW_ORDER.index(current_stage)
+            new_idx = WORKFLOW_ORDER.index(new_stage)
+            if new_idx != cur_idx + 1:
+                return tool_error(
+                    f"순서 위반: {current_stage} → {new_stage} "
+                    f"(한 단계씩만 전진 가능)"
+                )
 
         result = _supabase_patch("os_projects", project_id, {
             "workflow_stage": new_stage,

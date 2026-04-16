@@ -60,8 +60,12 @@ _DISCORD_API = "https://discord.com/api/v10"
 # ---------------------------------------------------------------------------
 
 
+# 모듈 로드 시 1회 읽기 (핫패스 반복 조회 방지)
+_BOT_TOKEN: str = os.getenv("DISCORD_BOT_TOKEN", "")
+
+
 def _get_bot_token() -> str:
-    return os.getenv("DISCORD_BOT_TOKEN", "")
+    return _BOT_TOKEN
 
 
 def _get_webhook_url() -> str:
