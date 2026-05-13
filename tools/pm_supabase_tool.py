@@ -53,7 +53,8 @@ UUID_RE = re.compile(
     re.IGNORECASE,
 )
 
-_TASK_QUERY_LIMIT = 50  # 태스크 기본 조회 상한
+_TASK_QUERY_LIMIT = 200  # 태스크 기본 조회 상한 (운영 규모 134건+ 대응)
+_GITHUB_QUERY_LIMIT = 100  # GitHub 이벤트 기본 조회 상한
 
 _TIMEOUT = 15  # 초
 _http_client: Optional[httpx.Client] = None
@@ -83,19 +84,23 @@ def _check_pm_available() -> bool:
 
 
 def _get_client() -> httpx.Client:
-    """모듈 수준 httpx Client (연결 풀 재사용)."""
+    """모듈 수준 httpx Client (연결 풀 재사용). 헤더는 매번 최신 key로 갱신.
+
+    secret rotation 대응: 연결 풀은 재사용하되, headers는 호출 시점의 key를 반영.
+    """
     global _http_client
+    _, key = _get_config()
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
     if _http_client is None or _http_client.is_closed:
-        _, key = _get_config()
-        _http_client = httpx.Client(
-            headers={
-                "apikey": key,
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "Prefer": "return=representation",
-            },
-            timeout=_TIMEOUT,
-        )
+        _http_client = httpx.Client(headers=headers, timeout=_TIMEOUT)
+    else:
+        # rotation 시 헤더 갱신
+        _http_client.headers.update(headers)
     return _http_client
 
 
@@ -186,7 +191,8 @@ def _handle_pm_get_projects(args: dict, **kw) -> str:
             "select": (
                 "id,name,workflow_stage,progress_pct,"
                 "total_tasks,done_tasks,active_tasks,"
-                "owner_id,owner_name,github_recent_commits,github_recent_prs"
+                "owner_id,owner_name,github_recent_commits,github_recent_prs,"
+                "last_task_activity,github_last_event_at"
             ),
             "order": "name.asc",
         })
@@ -204,7 +210,8 @@ def _handle_pm_get_tasks(args: dict, **kw) -> str:
         params: Dict[str, str] = {
             "select": (
                 "id,title,status,priority,owner_id,"
-                "due_date,project_id,created_at"
+                "due_date,project_id,created_at,"
+                "os_projects(project_name)"
             ),
             "order": "created_at.desc",
             "limit": str(_TASK_QUERY_LIMIT),
@@ -236,10 +243,13 @@ def _handle_pm_get_tasks(args: dict, **kw) -> str:
 
         rows = _supabase_get("os_tasks", params)
 
-        # 지연 일수 + 담당자 이름 보강
+        # 지연 일수 + 담당자 이름 보강 + project_name 평탄화
         for row in rows:
             row["delay_days"] = _calc_delay_days(row.get("due_date"))
             row["assigned_name"] = _member_name(row.get("owner_id"))
+            # PostgREST embedded resource를 평탄화 (LLM 가독성)
+            project = row.pop("os_projects", None)
+            row["project_name"] = project.get("project_name") if project else None
 
         return json.dumps({"count": len(rows), "tasks": rows}, ensure_ascii=False)
     except Exception as e:
@@ -248,9 +258,10 @@ def _handle_pm_get_tasks(args: dict, **kw) -> str:
 
 
 def _handle_pm_get_github_activity(args: dict, **kw) -> str:
-    """최근 N시간 GitHub 커밋/PR 조회."""
+    """최근 N시간 GitHub 커밋/PR 조회. limit 파라미터 지원 (기본 100, 최대 500)."""
     try:
         hours = int(args.get("hours", 24))
+        limit = min(int(args.get("limit", _GITHUB_QUERY_LIMIT)), 500)
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
         params: Dict[str, str] = {
@@ -260,7 +271,7 @@ def _handle_pm_get_github_activity(args: dict, **kw) -> str:
             ),
             "event_at": f"gte.{since}",
             "order": "event_at.desc",
-            "limit": "50",
+            "limit": str(limit),
         }
 
         member_id = args.get("member_id")
@@ -435,6 +446,10 @@ PM_GET_GITHUB_ACTIVITY_SCHEMA = {
             "hours": {
                 "type": "integer",
                 "description": "조회 범위 (시간). 기본 24.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "최대 조회 건수. 기본 100, 상한 500.",
             },
             "member_id": {
                 "type": "string",
