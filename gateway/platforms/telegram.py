@@ -304,6 +304,17 @@ class TelegramAdapter(BasePlatformAdapter):
                     ),
                     retryable=False,
                 )
+                # supervisor/recovery 흐름이 알 수 있도록 fatal 알림 발사 (codex H2).
+                await self._notify_fatal_error()
+                return
+            # codex H1 — sleep 중 disconnect() 가 self._app 을 None 으로 만들었을
+            # 수 있다. start_polling 진입 전 가드 + 재획득한 lock release 로 누수 차단.
+            if not self._app or not self._app.updater:
+                logger.info(
+                    "[%s] Telegram adapter was disconnected during conflict retry; releasing reacquired lock and exiting.",
+                    self.name,
+                )
+                self._release_platform_lock()
                 return
             try:
                 await self._app.updater.start_polling(

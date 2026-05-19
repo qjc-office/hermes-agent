@@ -276,6 +276,88 @@ async def test_polling_conflict_reacquire_failure_unifies_fatal_code(monkeypatch
     )
     assert adapter.has_fatal_error is True
     assert adapter.fatal_error_retryable is False
+    # codex H2 — supervisor/recovery notify 가 트리거되어야 함
+    fatal_handler.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_polling_conflict_handles_app_disconnected_during_sleep(monkeypatch):
+    """codex H1 race — sleep 중 disconnect() 가 self._app=None 만들면 NPE 없이 정상 return.
+
+    release_platform_lock → asyncio.sleep → acquire_platform_lock 사이에 다른
+    async task 가 ``adapter.disconnect()`` 를 호출하면 ``self._app`` 이 None 으로
+    초기화될 수 있다. 이후 ``self._app.updater.start_polling(...)`` 시도가 NPE 를
+    발생시키고 except 블록의 단순 ``return`` 은 방금 재획득한 platform lock 을
+    release 하지 않아 supervisor 재기동 시 동일 token 확보가 영구 차단된다.
+
+    가드: reacquire 직후 ``self._app`` / ``self._app.updater`` 가 None 이면
+    재획득한 lock 을 즉시 release 하고 return.
+    """
+    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
+
+    monkeypatch.setattr(
+        "gateway.status.acquire_scoped_lock",
+        lambda scope, identity, metadata=None: (True, None),
+    )
+    release_calls = []
+    monkeypatch.setattr(
+        "gateway.status.release_scoped_lock",
+        lambda scope, identity: release_calls.append((scope, identity)),
+    )
+
+    captured = {}
+
+    async def fake_start_polling(**kwargs):
+        captured["error_callback"] = kwargs["error_callback"]
+
+    updater = SimpleNamespace(
+        start_polling=AsyncMock(side_effect=fake_start_polling),
+        stop=AsyncMock(),
+        running=True,
+    )
+    bot = SimpleNamespace(set_my_commands=AsyncMock(), delete_webhook=AsyncMock())
+    app = SimpleNamespace(
+        bot=bot,
+        updater=updater,
+        add_handler=MagicMock(),
+        initialize=AsyncMock(),
+        start=AsyncMock(),
+    )
+    builder = MagicMock()
+    builder.token.return_value = builder
+    builder.request.return_value = builder
+    builder.get_updates_request.return_value = builder
+    builder.build.return_value = app
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.Application",
+        SimpleNamespace(builder=MagicMock(return_value=builder)),
+    )
+
+    # sleep 중 disconnect() 동시 실행 흉내 — self._app=None 으로 초기화
+    async def _disconnect_during_sleep(_):
+        adapter._app = None
+
+    monkeypatch.setattr("asyncio.sleep", _disconnect_during_sleep)
+
+    ok = await adapter.connect()
+    assert ok is True
+
+    conflict = type("Conflict", (Exception,), {})
+
+    # NPE 없이 정상 return 해야 함 (가드 작동)
+    await adapter._handle_polling_conflict(
+        conflict("Conflict: terminated by other getUpdates request")
+    )
+
+    # 가드 작동 검증: self._app=None 이므로 재획득 후 start_polling 시도 안 함 +
+    # 재획득한 lock 도 release 되어 누수 없음 (release_scoped_lock 2회 호출).
+    assert len(release_calls) >= 2, (
+        f"Reacquired lock must be released when adapter disconnected during sleep, "
+        f"got {len(release_calls)} release call(s)"
+    )
+    assert adapter.has_fatal_error is False, (
+        "disconnect during sleep is normal teardown, not fatal"
+    )
 
 
 @pytest.mark.asyncio
