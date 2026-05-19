@@ -281,7 +281,30 @@ class TelegramAdapter(BasePlatformAdapter):
                     await self._app.updater.stop()
             except Exception:
                 pass
+            # Release the scoped lock so a stale sibling can surrender its
+            # lease; reacquiring before restart proves this process still owns
+            # the token (Sprint 2.2 — baseline 468 conflict events / 2d).
+            self._release_platform_lock()
             await asyncio.sleep(RETRY_DELAY)
+            if not self._acquire_platform_lock(
+                'telegram-bot-token', self.config.token, 'Telegram bot token'
+            ):
+                logger.error(
+                    "[%s] Telegram platform lock reacquire failed on retry %d; another poller holds the token",
+                    self.name, self._polling_conflict_count,
+                )
+                # Unify fatal_error_code with the conflict guard at line 261 so
+                # subsequent conflict events take the early-exit branch — base.py
+                # would otherwise leave it as 'telegram-bot-token_lock' (H1).
+                self._set_fatal_error(
+                    "telegram_polling_conflict",
+                    (
+                        f"Telegram bot token lock reacquire failed on retry "
+                        f"{self._polling_conflict_count}; another poller holds the token."
+                    ),
+                    retryable=False,
+                )
+                return
             try:
                 await self._app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,

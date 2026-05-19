@@ -16,9 +16,38 @@ Import chain (circular-import safe):
 
 import json
 import logging
-from typing import Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
+
+from pydantic import BaseModel, ValidationError, field_validator
 
 logger = logging.getLogger(__name__)
+
+
+class _ToolSchemaCheck(BaseModel):
+    """Soft validator for OpenAI Function Calling tool schemas.
+
+    ``register()`` passes the raw ``schema`` dict through this model and logs a
+    warning on mismatch without raising — 1단계 호환성 모드 (Sprint 2.1 plan).
+    2단계에서는 ValidationError를 raise로 전환.
+    """
+
+    name: Optional[str] = None
+    description: Optional[str] = ""
+    # OpenAI Function Calling 스펙: parameters 객체 생략 가능 (= 0-arg 도구).
+    # Optional 로 두지 않으면 0-arg 도구마다 WARNING 노이즈 + 2단계 raise 전환 시 회귀 (H2).
+    parameters: Optional[Dict[str, Any]] = None
+
+    @field_validator("parameters")
+    @classmethod
+    def _parameters_shape(cls, v):
+        if v is None:
+            return v
+        if v.get("type") != "object":
+            raise ValueError("parameters.type must be 'object'")
+        properties = v.get("properties")
+        if not isinstance(properties, dict):
+            raise ValueError("parameters.properties must be a dict")
+        return v
 
 
 class ToolEntry:
@@ -70,6 +99,18 @@ class ToolRegistry:
         max_result_size_chars: int | float | None = None,
     ):
         """Register a tool.  Called at module-import time by each tool file."""
+        try:
+            _ToolSchemaCheck(**schema)
+        except ValidationError as exc:
+            logger.warning(
+                "Tool '%s' (toolset '%s') schema failed OpenAI Function Calling validation: %s",
+                name, toolset, exc.errors(include_url=False),
+            )
+        except TypeError as exc:
+            logger.warning(
+                "Tool '%s' (toolset '%s') schema is not a mapping: %s",
+                name, toolset, exc,
+            )
         existing = self._tools.get(name)
         if existing and existing.toolset != toolset:
             logger.warning(

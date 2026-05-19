@@ -208,6 +208,77 @@ async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_polling_conflict_reacquire_failure_unifies_fatal_code(monkeypatch):
+    """Sprint 2.2 H1 — 재획득 실패 시 fatal_error_code가 conflict guard 키와 통일되어야 한다.
+
+    base.py의 ``_acquire_platform_lock`` 실패는 ``scope+'_lock'`` (예:
+    ``telegram-bot-token_lock``) 으로 fatal_error_code 를 세팅하지만,
+    ``_handle_polling_conflict`` line 261 조기 탈출 가드는
+    ``telegram_polling_conflict`` 키를 기대한다. telegram.py 에서 명시
+    ``_set_fatal_error`` 호출로 키를 통일해야 다음 conflict 호출에서
+    무한 재시도를 막을 수 있다.
+    """
+    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
+    fatal_handler = AsyncMock()
+    adapter.set_fatal_error_handler(fatal_handler)
+
+    acquire_calls = {"n": 0}
+
+    def _acquire(scope, identity, metadata=None):
+        acquire_calls["n"] += 1
+        if acquire_calls["n"] == 1:
+            return (True, None)
+        return (False, {"pid": 9999})
+
+    monkeypatch.setattr("gateway.status.acquire_scoped_lock", _acquire)
+    monkeypatch.setattr("gateway.status.release_scoped_lock", lambda scope, identity: None)
+
+    captured = {}
+
+    async def fake_start_polling(**kwargs):
+        captured["error_callback"] = kwargs["error_callback"]
+
+    updater = SimpleNamespace(
+        start_polling=AsyncMock(side_effect=fake_start_polling),
+        stop=AsyncMock(),
+        running=True,
+    )
+    bot = SimpleNamespace(set_my_commands=AsyncMock(), delete_webhook=AsyncMock())
+    app = SimpleNamespace(
+        bot=bot,
+        updater=updater,
+        add_handler=MagicMock(),
+        initialize=AsyncMock(),
+        start=AsyncMock(),
+    )
+    builder = MagicMock()
+    builder.token.return_value = builder
+    builder.request.return_value = builder
+    builder.get_updates_request.return_value = builder
+    builder.build.return_value = app
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.Application",
+        SimpleNamespace(builder=MagicMock(return_value=builder)),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    ok = await adapter.connect()
+    assert ok is True
+
+    conflict = type("Conflict", (Exception,), {})
+    await adapter._handle_polling_conflict(
+        conflict("Conflict: terminated by other getUpdates request")
+    )
+
+    assert adapter.fatal_error_code == "telegram_polling_conflict", (
+        f"reacquire failure should unify with conflict guard key, "
+        f"got {adapter.fatal_error_code!r}"
+    )
+    assert adapter.has_fatal_error is True
+    assert adapter.fatal_error_retryable is False
+
+
+@pytest.mark.asyncio
 async def test_connect_marks_retryable_fatal_error_for_startup_network_failure(monkeypatch):
     adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
 
