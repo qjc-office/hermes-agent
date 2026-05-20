@@ -3,6 +3,9 @@
 import json
 import logging
 
+import pytest
+from pydantic import ValidationError
+
 from tools.registry import ToolRegistry
 
 
@@ -389,6 +392,71 @@ class TestSchemaValidation:
             except (TypeError, AttributeError):
                 pass
         assert any("not a mapping" in r.getMessage() for r in caplog.records)
+
+
+class TestSchemaStrictMode:
+    """Sprint 2 follow-up #2 — HERMES_STRICT_SCHEMA_VALIDATION env flag로 2단계 raise 전환."""
+
+    def test_strict_env_flag_raises_validation_error(self, monkeypatch):
+        """env=1 시 ValidationError 가 raise 되어야 함 (2단계 strict 모드)."""
+        monkeypatch.setenv("HERMES_STRICT_SCHEMA_VALIDATION", "1")
+        reg = ToolRegistry()
+        bad = {
+            "name": "bad",
+            "description": "wrong type",
+            "parameters": {"type": "array", "properties": {}},
+        }
+        with pytest.raises(ValidationError):
+            reg.register(name="strict_bad", toolset="s", schema=bad, handler=_dummy_handler)
+        # raise 됐으니 등록되지 않아야 함
+        assert "strict_bad" not in reg._tools
+
+    def test_strict_env_flag_unset_warns_only(self, monkeypatch, caplog):
+        """env unset 시 기존대로 warning + 등록 (1단계 호환성 default)."""
+        monkeypatch.delenv("HERMES_STRICT_SCHEMA_VALIDATION", raising=False)
+        reg = ToolRegistry()
+        bad = {
+            "name": "bad",
+            "description": "wrong type",
+            "parameters": {"type": "array", "properties": {}},
+        }
+        with caplog.at_level(logging.WARNING, logger="tools.registry"):
+            reg.register(name="warn_bad", toolset="s", schema=bad, handler=_dummy_handler)
+        assert any("schema failed" in r.getMessage() for r in caplog.records)
+        assert "warn_bad" in reg._tools
+
+    def test_warning_counter_increments_on_invalid_schema(self, monkeypatch):
+        """warning 발생 시 counter 증가, 정상 schema 는 증가 안 함.
+
+        2단계 strict raise 전환 트리거 판단(예: 연속 X일 0건)용 관찰 가능성.
+        """
+        from tools.registry import get_schema_warning_count, _reset_schema_warning_count
+        monkeypatch.delenv("HERMES_STRICT_SCHEMA_VALIDATION", raising=False)
+        _reset_schema_warning_count()
+        assert get_schema_warning_count() == 0
+
+        reg = ToolRegistry()
+        # 정상 schema → counter 증가 안 함
+        reg.register(name="ok", toolset="s", schema=_make_schema("ok"), handler=_dummy_handler)
+        assert get_schema_warning_count() == 0
+
+        # 잘못된 schema (parameters.type != 'object') → counter 1 증가
+        bad = {
+            "name": "bad",
+            "description": "wrong",
+            "parameters": {"type": "array", "properties": {}},
+        }
+        reg.register(name="bad", toolset="s", schema=bad, handler=_dummy_handler)
+        assert get_schema_warning_count() == 1
+
+        # 또 다른 잘못된 schema (parameters not dict) → counter 2 증가
+        bad2 = {"name": "bad2", "parameters": "not-a-dict"}
+        reg.register(name="bad2", toolset="s", schema=bad2, handler=_dummy_handler)
+        assert get_schema_warning_count() == 2
+
+        # 등록은 여전히 (1단계 호환) 성공
+        assert "bad" in reg._tools
+        assert "bad2" in reg._tools
 
 
 class TestSecretCaptureResultContract:
