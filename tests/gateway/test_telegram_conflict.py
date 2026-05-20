@@ -205,6 +205,11 @@ async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
     )
     assert adapter.has_fatal_error is True
     fatal_handler.assert_awaited_once()
+    # Sprint 2 follow-up #1 — fatal 진입 시 카운터 0 reset (동일 adapter 인스턴스
+    # 재활용 시 다음 첫 conflict 부터 즉시 MAX 초과로 분기되어 retry 박탈되는 회귀 방지)
+    assert adapter._polling_conflict_count == 0, (
+        f"Counter must reset to 0 on fatal exhaustion, got {adapter._polling_conflict_count}"
+    )
 
 
 @pytest.mark.asyncio
@@ -278,6 +283,10 @@ async def test_polling_conflict_reacquire_failure_unifies_fatal_code(monkeypatch
     assert adapter.fatal_error_retryable is False
     # codex H2 — supervisor/recovery notify 가 트리거되어야 함
     fatal_handler.assert_awaited_once()
+    # Sprint 2 follow-up #1 — fatal 진입 시 카운터 0 reset
+    assert adapter._polling_conflict_count == 0, (
+        f"Counter must reset to 0 on reacquire-failure fatal path, got {adapter._polling_conflict_count}"
+    )
 
 
 @pytest.mark.asyncio
@@ -357,6 +366,89 @@ async def test_polling_conflict_handles_app_disconnected_during_sleep(monkeypatc
     )
     assert adapter.has_fatal_error is False, (
         "disconnect during sleep is normal teardown, not fatal"
+    )
+
+
+@pytest.mark.asyncio
+async def test_polling_conflict_releases_reacquired_lock_on_cancel(monkeypatch):
+    """Sprint 2 follow-up #3 (gemini MEDIUM) — start_polling 중 cancel 시 재획득 lock 누수 차단.
+
+    부모 task 가 ``_handle_polling_conflict`` 진행 중 cancel 될 때 가장 위험한
+    지점은 **재획득 후 start_polling 도중** cancel.  현재 코드는
+    ``except Exception`` 만 catch 하므로 ``CancelledError`` (BaseException
+    subclass, 3.8+ 부터 Exception 아님) 가 그대로 propagate 되며, 재획득한
+    platform lock 이 release 되지 않아 supervisor 재기동 시 동일 token 확보가
+    영구 차단된다.
+
+    가드: retry branch 전체를 ``try/except asyncio.CancelledError`` 로 감싸고,
+    cancel 발생 시 ``_release_platform_lock()`` (idempotent) 호출 후 propagate.
+    """
+    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
+
+    monkeypatch.setattr(
+        "gateway.status.acquire_scoped_lock",
+        lambda scope, identity, metadata=None: (True, None),
+    )
+    release_calls = []
+    monkeypatch.setattr(
+        "gateway.status.release_scoped_lock",
+        lambda scope, identity: release_calls.append((scope, identity)),
+    )
+
+    captured = {"calls": 0}
+
+    async def fake_start_polling(**kwargs):
+        captured["calls"] += 1
+        if captured["calls"] == 1:
+            # connect() 첫 호출 — 정상 setup
+            captured["error_callback"] = kwargs["error_callback"]
+            return
+        # _handle_polling_conflict 의 재시도 호출 — cancel 흉내
+        raise asyncio.CancelledError()
+
+    updater = SimpleNamespace(
+        start_polling=AsyncMock(side_effect=fake_start_polling),
+        stop=AsyncMock(),
+        running=True,
+    )
+    bot = SimpleNamespace(set_my_commands=AsyncMock(), delete_webhook=AsyncMock())
+    app = SimpleNamespace(
+        bot=bot,
+        updater=updater,
+        add_handler=MagicMock(),
+        initialize=AsyncMock(),
+        start=AsyncMock(),
+    )
+    builder = MagicMock()
+    builder.token.return_value = builder
+    builder.request.return_value = builder
+    builder.get_updates_request.return_value = builder
+    builder.build.return_value = app
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.Application",
+        SimpleNamespace(builder=MagicMock(return_value=builder)),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())  # sleep 통과
+
+    ok = await adapter.connect()
+    assert ok is True
+    assert captured["calls"] == 1, "connect() should have called start_polling once"
+
+    conflict = type("Conflict", (Exception,), {})
+
+    # 재시도 호출 시 start_polling 이 CancelledError raise → 가드 작동해야 함
+    with pytest.raises(asyncio.CancelledError):
+        await adapter._handle_polling_conflict(
+            conflict("Conflict: terminated by other getUpdates request")
+        )
+
+    # release 가 최소 2회 호출되어야 함 — line 287 첫 release + 가드 release
+    # (재획득 lock 누수 차단 핵심 검증)
+    assert len(release_calls) >= 2, (
+        f"Reacquired lock must be released on CancelledError, got {len(release_calls)} call(s)"
+    )
+    assert adapter._platform_lock_identity is None, (
+        "platform lock identity must be cleared after cancellation"
     )
 
 

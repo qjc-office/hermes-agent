@@ -281,9 +281,15 @@ class TelegramAdapter(BasePlatformAdapter):
                     await self._app.updater.stop()
             except Exception:
                 pass
-            # Release the scoped lock so a stale sibling can surrender its
-            # lease; reacquiring before restart proves this process still owns
-            # the token (Sprint 2.2 — baseline 468 conflict events / 2d).
+            # Release the scoped lock so a stale sibling (e.g. a previous
+            # gateway instance whose long-poll session has not fully expired)
+            # has an opportunity to claim the token and then surrender it on
+            # its next health check.  After ``asyncio.sleep`` we re-enter the
+            # acquire race; winning the race confirms no other *live* poller
+            # currently holds the token, while losing surfaces as the
+            # "reacquire failed" fatal path below (Sprint 2.2 — baseline 468
+            # conflict events / 2d; gemini 2026-05-20 — clarified release-then-
+            # reacquire is competitive, not ownership-preserving).
             self._release_platform_lock()
             await asyncio.sleep(RETRY_DELAY)
             if not self._acquire_platform_lock(
@@ -306,6 +312,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
                 # supervisor/recovery 흐름이 알 수 있도록 fatal 알림 발사 (codex H2).
                 await self._notify_fatal_error()
+                # Sprint 2 follow-up #1 — 동일 adapter 인스턴스 재활용 시 다음 첫
+                # conflict 부터 즉시 MAX 초과로 분기되지 않도록 카운터 리셋.
+                self._polling_conflict_count = 0
                 return
             # codex H1 — sleep 중 disconnect() 가 self._app 을 None 으로 만들었을
             # 수 있다. start_polling 진입 전 가드 + 재획득한 lock release 로 누수 차단.
@@ -325,6 +334,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.info("[%s] Telegram polling resumed after conflict retry %d", self.name, self._polling_conflict_count)
                 self._polling_conflict_count = 0  # reset on success
                 return
+            except asyncio.CancelledError:
+                # Sprint 2 follow-up #3 (gemini MEDIUM) — 부모 task cancel 시 재획득한
+                # platform lock 누수 차단.  CancelledError 는 BaseException(3.8+) 이라
+                # 아래 ``except Exception`` 에 잡히지 않고 그대로 propagate 되므로
+                # 명시적 release 가 필요하다.
+                self._release_platform_lock()
+                raise
             except Exception as retry_err:
                 logger.warning("[%s] Telegram polling retry failed: %s", self.name, retry_err)
                 # Don't fall through to fatal yet — wait for the next conflict
@@ -342,6 +358,8 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         logger.error("[%s] %s Original error: %s", self.name, message, error)
         self._set_fatal_error("telegram_polling_conflict", message, retryable=False)
+        # Sprint 2 follow-up #1 — fatal 진입 시 카운터 리셋 (재활용 회귀 방지)
+        self._polling_conflict_count = 0
         try:
             if self._app and self._app.updater:
                 await self._app.updater.stop()

@@ -16,11 +16,45 @@ Import chain (circular-import safe):
 
 import json
 import logging
+import os
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 logger = logging.getLogger(__name__)
+
+
+# Sprint 2 follow-up #2 — 1단계(warn) 모드의 누적 warning 카운터.
+# 2단계 strict raise 전환 시점 판단(예: warning 0건 연속 X일) 의 근거 자료.
+# ``get_schema_warning_count()`` 외부 API 로 노출하여 metrics dashboard 또는
+# 운영 점검 cron 에서 폴링 가능.
+_schema_warning_count: int = 0
+
+
+def get_schema_warning_count() -> int:
+    """Sprint 2 follow-up #2 — Return cumulative schema warning count since process start.
+
+    Used as an observability anchor for the 1단계(warn) → 2단계(raise) migration
+    of OpenAI Function Calling schema validation.  Operations can monitor this
+    via metrics polling; a sustained zero indicates safe time to flip
+    ``HERMES_STRICT_SCHEMA_VALIDATION=1``.
+    """
+    return _schema_warning_count
+
+
+def _reset_schema_warning_count() -> None:
+    """Reset counter to 0.  **Test isolation only** — do not call in production paths."""
+    global _schema_warning_count
+    _schema_warning_count = 0
+
+
+def _is_strict_mode() -> bool:
+    """Sprint 2 follow-up #2 — env flag ``HERMES_STRICT_SCHEMA_VALIDATION`` 검사.
+
+    1단계(default, unset/false/0): ValidationError → warning + counter 증가 + 등록 진행.
+    2단계(strict=1/true/yes): ValidationError → raise.
+    """
+    return os.environ.get('HERMES_STRICT_SCHEMA_VALIDATION', '').lower() in ('1', 'true', 'yes')
 
 
 class _ToolSchemaCheck(BaseModel):
@@ -28,8 +62,14 @@ class _ToolSchemaCheck(BaseModel):
 
     ``register()`` passes the raw ``schema`` dict through this model and logs a
     warning on mismatch without raising — 1단계 호환성 모드 (Sprint 2.1 plan).
-    2단계에서는 ValidationError를 raise로 전환.
+    2단계에서는 ``HERMES_STRICT_SCHEMA_VALIDATION=1`` env flag 로 ValidationError raise 전환.
     """
+
+    # Sprint 2 follow-up #2 — extra 필드 정책 명시.
+    # OpenAI Function Calling 스키마는 미래에 추가 필드(strict, additionalProperties 등)
+    # 가 등장할 수 있어 ignore 로 유지.  2단계 전환 시 extra 필드 인벤토리 수집 후
+    # 'forbid' 로 전환을 별도 검토할 것.
+    model_config = ConfigDict(extra='ignore')
 
     name: Optional[str] = None
     description: Optional[str] = ""
@@ -99,14 +139,23 @@ class ToolRegistry:
         max_result_size_chars: int | float | None = None,
     ):
         """Register a tool.  Called at module-import time by each tool file."""
+        global _schema_warning_count
+        strict = _is_strict_mode()
         try:
             _ToolSchemaCheck(**schema)
         except ValidationError as exc:
+            if strict:
+                # Sprint 2 follow-up #2 — 2단계 strict 모드는 raise 로 등록 차단.
+                raise
+            _schema_warning_count += 1
             logger.warning(
                 "Tool '%s' (toolset '%s') schema failed OpenAI Function Calling validation: %s",
                 name, toolset, exc.errors(include_url=False),
             )
         except TypeError as exc:
+            if strict:
+                raise
+            _schema_warning_count += 1
             logger.warning(
                 "Tool '%s' (toolset '%s') schema is not a mapping: %s",
                 name, toolset, exc,
