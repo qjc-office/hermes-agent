@@ -1,6 +1,7 @@
 """Tests for the central tool registry."""
 
 import json
+import logging
 
 from tools.registry import ToolRegistry
 
@@ -299,6 +300,95 @@ class TestEmojiMetadata:
             handler=_dummy_handler, emoji="",
         )
         assert reg.get_emoji("t") == "⚡"
+
+
+class TestSchemaValidation:
+    """Sprint 2.1 — pydantic soft validator warns but does not raise."""
+
+    def test_valid_schema_emits_no_warning(self, caplog):
+        reg = ToolRegistry()
+        with caplog.at_level(logging.WARNING, logger="tools.registry"):
+            reg.register(
+                name="ok", toolset="s",
+                schema=_make_schema("ok"), handler=_dummy_handler,
+            )
+        assert not any(
+            "OpenAI Function Calling validation" in r.getMessage() for r in caplog.records
+        )
+
+    def test_zero_arg_tool_emits_no_warning(self, caplog):
+        """Sprint 2.1 H2 — parameters 키 누락은 0-arg 도구로 valid 처리 (OpenAI spec).
+
+        OpenAI Function Calling 스펙은 ``function.parameters`` 객체의 생략을
+        허용하며, 이는 "arguments 없음"으로 해석된다. soft validator가 이를
+        스키마 실패로 분류하면 0-arg 도구마다 WARNING 노이즈가 쌓이고,
+        Sprint 2단계 strict raise 전환 시 0-arg 도구가 전부 깨진다.
+        """
+        reg = ToolRegistry()
+        zero_arg = {"name": "zero", "description": "no args"}
+        with caplog.at_level(logging.WARNING, logger="tools.registry"):
+            reg.register(
+                name="zero", toolset="s", schema=zero_arg, handler=_dummy_handler,
+            )
+        assert not any(
+            "OpenAI Function Calling" in r.getMessage() for r in caplog.records
+        ), "0-arg tool should not trigger schema warning"
+        assert not any(
+            "schema failed" in r.getMessage() for r in caplog.records
+        ), "0-arg tool should not trigger schema warning"
+        assert "zero" in reg._tools
+
+    def test_parameters_wrong_type_warns(self, caplog):
+        reg = ToolRegistry()
+        bad = {
+            "name": "bad",
+            "description": "wrong type",
+            "parameters": {"type": "array", "properties": {}},
+        }
+        with caplog.at_level(logging.WARNING, logger="tools.registry"):
+            reg.register(
+                name="bad2", toolset="s", schema=bad, handler=_dummy_handler,
+            )
+        assert any(
+            "parameters.type must be 'object'" in r.getMessage() for r in caplog.records
+        )
+
+    def test_missing_properties_warns(self, caplog):
+        reg = ToolRegistry()
+        bad = {
+            "name": "bad",
+            "description": "no props",
+            "parameters": {"type": "object"},
+        }
+        with caplog.at_level(logging.WARNING, logger="tools.registry"):
+            reg.register(
+                name="bad3", toolset="s", schema=bad, handler=_dummy_handler,
+            )
+        assert any(
+            "parameters.properties must be a dict" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_parameters_not_dict_warns(self, caplog):
+        reg = ToolRegistry()
+        bad = {"name": "bad", "description": "parameters is str", "parameters": "nope"}
+        with caplog.at_level(logging.WARNING, logger="tools.registry"):
+            reg.register(
+                name="bad4", toolset="s", schema=bad, handler=_dummy_handler,
+            )
+        assert any("schema failed" in r.getMessage() for r in caplog.records)
+
+    def test_schema_not_mapping_warns(self, caplog):
+        reg = ToolRegistry()
+        with caplog.at_level(logging.WARNING, logger="tools.registry"):
+            try:
+                reg.register(
+                    name="bad5", toolset="s", schema="not-a-dict",  # type: ignore[arg-type]
+                    handler=_dummy_handler,
+                )
+            except (TypeError, AttributeError):
+                pass
+        assert any("not a mapping" in r.getMessage() for r in caplog.records)
 
 
 class TestSecretCaptureResultContract:

@@ -281,7 +281,41 @@ class TelegramAdapter(BasePlatformAdapter):
                     await self._app.updater.stop()
             except Exception:
                 pass
+            # Release the scoped lock so a stale sibling can surrender its
+            # lease; reacquiring before restart proves this process still owns
+            # the token (Sprint 2.2 — baseline 468 conflict events / 2d).
+            self._release_platform_lock()
             await asyncio.sleep(RETRY_DELAY)
+            if not self._acquire_platform_lock(
+                'telegram-bot-token', self.config.token, 'Telegram bot token'
+            ):
+                logger.error(
+                    "[%s] Telegram platform lock reacquire failed on retry %d; another poller holds the token",
+                    self.name, self._polling_conflict_count,
+                )
+                # Unify fatal_error_code with the conflict guard at line 261 so
+                # subsequent conflict events take the early-exit branch — base.py
+                # would otherwise leave it as 'telegram-bot-token_lock' (H1).
+                self._set_fatal_error(
+                    "telegram_polling_conflict",
+                    (
+                        f"Telegram bot token lock reacquire failed on retry "
+                        f"{self._polling_conflict_count}; another poller holds the token."
+                    ),
+                    retryable=False,
+                )
+                # supervisor/recovery 흐름이 알 수 있도록 fatal 알림 발사 (codex H2).
+                await self._notify_fatal_error()
+                return
+            # codex H1 — sleep 중 disconnect() 가 self._app 을 None 으로 만들었을
+            # 수 있다. start_polling 진입 전 가드 + 재획득한 lock release 로 누수 차단.
+            if not self._app or not self._app.updater:
+                logger.info(
+                    "[%s] Telegram adapter was disconnected during conflict retry; releasing reacquired lock and exiting.",
+                    self.name,
+                )
+                self._release_platform_lock()
+                return
             try:
                 await self._app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
